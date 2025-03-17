@@ -1,0 +1,5 @@
+discord.py==2.3.2
+python-dotenv==1.0.1
+fireworks-ai==0.13.0
+pymongo==4.6.2
+nomic 
