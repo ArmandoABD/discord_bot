@@ -82,7 +82,7 @@ def split_response(response, max_length=1900):
 async def get_relevant_context(question, max_results=5):
     """Get relevant context from MongoDB using vector similarity search"""
     try:
-        logger.info(f"Generating embedding for question: {question[:100]}...")
+        # Generate embedding for the question
         output = embed.text(
             texts=[question],
             model='nomic-embed-text-v1.5',
@@ -90,8 +90,8 @@ async def get_relevant_context(question, max_results=5):
             dimensionality=384 
         )
         question_embedding = output['embeddings'][0]
-        logger.info(f"Generated embedding with dimension: {len(question_embedding)}")
-        logger.info("Performing vector similarity search...")
+        
+        # Perform vector similarity search
         pipeline = [
             {
                 "$search": {
@@ -122,7 +122,7 @@ async def get_relevant_context(question, max_results=5):
                 chunk_num = result['metadata'].get('chunk_number', 'N/A')
                 total_chunks = result['metadata'].get('total_chunks', 'N/A')
                 score = result.get('score', 'N/A')                
-                logger.info(f"Result {i}: File={file_name}, Chunk={chunk_num}/{total_chunks}, Score={score}")
+                logger.info(f"Result {i}: File={file_name}, Score={score:.2f}")
                 context += f"\nFrom file: {file_name} (Chunk {chunk_num}/{total_chunks})\n"
                 context += f"Content: {result['content']}\n"
                 context += f"Relevance Score: {score}\n"
@@ -133,7 +133,7 @@ async def get_relevant_context(question, max_results=5):
         return ""
         
     except Exception as e:
-        logger.error(f"Error getting context: {str(e)}", exc_info=True)
+        logger.error(f"Error getting context: {str(e)}")
         return ""
 
 @bot.event
@@ -155,10 +155,10 @@ async def on_disconnect():
 async def on_error(event, *args, **kwargs):
     logger.error(f'Error in {event}: {args} {kwargs}')
 
-@bot.command(name='askpdf')
-async def askpdf(ctx, *, question):
-    """Ask a question about the AI model documentation from PDFs"""
-    logger.info(f"Received question from {ctx.author}: {question}")
+@bot.command(name='ask')
+async def ask(ctx, *, question):
+    """Ask a question about Fireworks AI models"""
+    logger.info(f"Question from {ctx.author}: {question[:50]}...")
     try:
         # Show typing indicator while processing
         async with ctx.typing():
@@ -201,13 +201,10 @@ async def askpdf(ctx, *, question):
             
             # Add context if available
             if context:
-                logger.info("Adding context to messages")
                 messages.append({
                     "role": "system",
                     "content": context
                 })
-            else:
-                logger.warning("No context available for the question")
             
             # Analyze question complexity to guide response length
             is_complex_question = any(marker in question.lower() 
@@ -215,11 +212,9 @@ async def askpdf(ctx, *, question):
                                                    "difference", "versus", "pros and cons"])
                 
             if is_complex_question:
-                logger.info("Complex question detected - detailed response expected")
                 # Add guidance for a more detailed response
                 question_with_guidance = f"{question}\n\nThis requires a detailed explanation."
             else:
-                logger.info("Simple question detected - concise response expected")
                 # Add guidance for a concise response
                 question_with_guidance = f"{question}\n\nKeep the response brief and to the point."
             
@@ -228,7 +223,7 @@ async def askpdf(ctx, *, question):
                 "content": question_with_guidance
             })
             
-            logger.info("Sending request to Fireworks API...")
+            # Get response from Fireworks
             response = fireworks_client.chat.completions.create(
                 model="accounts/fireworks/models/llama-v3p3-70b-instruct",
                 messages=messages,
@@ -236,7 +231,6 @@ async def askpdf(ctx, *, question):
             )
             
             ai_response = response.choices[0].message.content
-            logger.info(f"Generated response: {ai_response[:100]}...")
             
             if not ai_response:
                 logger.warning("Empty response from Fireworks API")
@@ -246,16 +240,14 @@ async def askpdf(ctx, *, question):
             response_chunks = split_response(ai_response)
             
             # Send the first chunk as a reply
-            logger.info("Sending response to Discord...")
             await ctx.reply(response_chunks[0])
             
             # Send any remaining chunks as follow-up messages
-            for i, chunk in enumerate(response_chunks[1:], 2):
-                logger.info(f"Sending chunk {i}/{len(response_chunks)}")
+            for chunk in response_chunks[1:]:
                 await ctx.send(chunk)
 
     except Exception as e:
-        logger.error(f"Error processing question: {str(e)}", exc_info=True)
+        logger.error(f"Error processing question: {str(e)}")
         await ctx.reply("Sorry, I encountered an error while processing your question. Please try again.")
 
 @bot.command(name='ping')

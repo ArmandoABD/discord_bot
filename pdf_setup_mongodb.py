@@ -75,7 +75,7 @@ def extract_text_from_pdf(pdf_path):
 
 def chunk_text(text, chunk_size=1000, overlap=100):
     """Split text into overlapping chunks"""
-    logger.info(f"Starting chunking process for text of length {len(text)}")
+    logger.info(f"Chunking text of length {len(text)}")
     chunks = []
     if not text:
         logger.warning("Empty text provided to chunking function")
@@ -99,10 +99,6 @@ def chunk_text(text, chunk_size=1000, overlap=100):
                 break
                 
             last_start = start
-            
-            # Log progress periodically
-            if chunk_count % 10 == 0:
-                logger.info(f"Chunking progress: {start}/{len(text)} characters processed, {chunk_count} chunks created")
             
             end = min(start + chunk_size, len(text))
             chunk = text[start:end]
@@ -131,15 +127,10 @@ def chunk_text(text, chunk_size=1000, overlap=100):
         if iterations >= max_iterations:
             logger.error(f"Chunking aborted after {iterations} iterations - possible infinite loop")
         
-        logger.info(f"Chunking complete: Created {len(chunks)} chunks with average length {sum(len(c) for c in chunks)/len(chunks) if chunks else 0:.2f}")
-        # Log a sample of the chunks
-        if chunks:
-            logger.info(f"First chunk sample: {chunks[0][:100]}...")
-            if len(chunks) > 1:
-                logger.info(f"Last chunk sample: {chunks[-1][:100]}...")
+        logger.info(f"Created {len(chunks)} chunks")
         return chunks
     except Exception as e:
-        logger.error(f"Error during chunking: {str(e)}", exc_info=True)
+        logger.error(f"Error during chunking: {str(e)}")
         return chunks
 
 def process_and_upload_documents(files_dir, collection):
@@ -154,66 +145,80 @@ def process_and_upload_documents(files_dir, collection):
     logger.info(f"Found {len(pdf_files)} PDF files to process")
     total_chunks_processed = 0
     
-    # Limit the number of files to process if needed for testing
-    # pdf_files = pdf_files[:5]  # Uncomment to process only the first 5 files
-    
     for i, pdf_path in enumerate(pdf_files):
         try:
-            logger.info(f"\nProcessing file {i+1}/{len(pdf_files)}: {pdf_path}")
+            logger.info(f"Processing file {i+1}/{len(pdf_files)}: {pdf_path}")
             
             # Extract text from PDF
             text = extract_text_from_pdf(pdf_path)
             if not text:
                 logger.warning(f"No text extracted from {pdf_path}, skipping...")
                 continue
-            
-            # DEBUG: Print first 100 characters of text
-            logger.info(f"DEBUG - Text sample: {text[:100]}...")
                 
             # Create chunks with overlap
-            logger.info("DEBUG - Starting chunking process...")
             chunks = chunk_text(text)
             if not chunks:
                 logger.warning(f"No chunks created from {pdf_path}, skipping...")
                 continue
-            logger.info(f"Created {len(chunks)} chunks from {pdf_path}")
             
-            # Generate embeddings for all chunks at once
-            logger.info("DEBUG - Starting embedding generation...")
+            # Generate embeddings for all chunks 
+            logger.info(f"Generating embeddings for {len(chunks)} chunks...")
             try:
                 # Split larger documents into smaller batches for embedding
-                max_batch_size = 5  # Process in smaller batches
+                max_batch_size = 2  # Small batches to avoid rate limits
                 all_embeddings = []
                 
                 for batch_start in range(0, len(chunks), max_batch_size):
                     batch_end = min(batch_start + max_batch_size, len(chunks))
                     batch = chunks[batch_start:batch_end]
                     
-                    logger.info(f"DEBUG - Processing batch {batch_start//max_batch_size + 1}, chunks {batch_start+1}-{batch_end}")
+                    # Implement retry logic with increasing delays
+                    max_retries = 5
+                    retry_count = 0
+                    retry_delay = 1
                     
-                    output = embed.text(
-                        texts=batch,
-                        model='nomic-embed-text-v1.5',
-                        task_type='search_document',
-                        dimensionality=384  # Match MongoDB index dimensions
-                    )
-                    
-                    batch_embeddings = output['embeddings']
-                    all_embeddings.extend(batch_embeddings)
-                    logger.info(f"DEBUG - Batch {batch_start//max_batch_size + 1} embedding completed")
+                    while retry_count < max_retries:
+                        try:
+                            # Add a small delay between batches to avoid rate limiting
+                            if batch_start > 0:
+                                import time
+                                time.sleep(2)  # 2-second delay between API calls
+                                
+                            output = embed.text(
+                                texts=batch,
+                                model='nomic-embed-text-v1.5',
+                                task_type='search_document',
+                                dimensionality=384  # Match MongoDB index dimensions
+                            )
+                            
+                            batch_embeddings = output['embeddings']
+                            all_embeddings.extend(batch_embeddings)
+                            break  # Break out of retry loop on success
+                            
+                        except Exception as e:
+                            retry_count += 1
+                            if retry_count >= max_retries:
+                                logger.error(f"Failed to process batch after {max_retries} retries: {str(e)}")
+                                raise  # Re-raise to be caught by outer try/except
+                            
+                            # Exponential backoff
+                            logger.warning(f"API error, retry {retry_count}/{max_retries} after {retry_delay}s: {str(e)}")
+                            import time
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Double the delay for next retry
                 
                 embeddings = all_embeddings
                     
                 if not embeddings:
                     logger.warning(f"No embeddings generated for {pdf_path}, skipping...")
                     continue
-                logger.info(f"Generated {len(embeddings)} embeddings of dimension {len(embeddings[0]) if embeddings else 0}")
+                logger.info(f"Generated {len(embeddings)} embeddings")
             except Exception as e:
-                logger.error(f"Error generating embeddings for {pdf_path}: {str(e)}", exc_info=True)
+                logger.error(f"Error generating embeddings for {pdf_path}: {str(e)}")
                 continue
             
             # Upload documents with their embeddings
-            logger.info("DEBUG - Starting MongoDB upload...")
+            logger.info("Uploading to MongoDB...")
             for j, (chunk, embedding) in enumerate(zip(chunks, embeddings), 1):
                 # Create document
                 doc = {
@@ -231,17 +236,16 @@ def process_and_upload_documents(files_dir, collection):
                 # Insert into MongoDB
                 try:
                     result = collection.insert_one(doc)
-                    logger.info(f"Uploaded chunk {j}/{len(chunks)} with ID: {result.inserted_id}")
                     total_chunks_processed += 1
                 except Exception as e:
-                    logger.error(f"Error uploading chunk {j} from {pdf_path}: {str(e)}", exc_info=True)
+                    logger.error(f"Error uploading chunk {j} from {pdf_path}: {str(e)}")
                 
             logger.info(f"Successfully processed and uploaded {pdf_path}")
                 
         except Exception as e:
-            logger.error(f"Error processing {pdf_path}: {str(e)}", exc_info=True)
+            logger.error(f"Error processing {pdf_path}: {str(e)}")
     
-    logger.info(f"\nProcessing complete. Total chunks processed: {total_chunks_processed}")
+    logger.info(f"Processing complete. Total chunks processed: {total_chunks_processed}")
     logger.info(f"Final document count in collection: {collection.count_documents({})}")
 
 if __name__ == "__main__":
